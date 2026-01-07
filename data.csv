@@ -1,0 +1,8 @@
+post,sentiment,topic,party
+I love the new education policy by the government!,positive,education,Party A
+This political party never fails to disappoint.,negative,general,Party B
+"The election debate was alright, nothing new.",neutral,elections,Party A
+Such a progressive bill passed today!,positive,legislation,Party B
+"Corruption at its peak, sad state of affairs.",negative,corruption,Party C
+Hope the new reforms actually work this time.,neutral,reforms,Party A
+,,,
