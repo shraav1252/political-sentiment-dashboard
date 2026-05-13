@@ -1,3 +1,5 @@
+from emotion_engine import predict_emotion, predict_emotion_batch
+from sentiment_engine import predict_sentiment
 import streamlit as st
 import pandas as pd
 import plotly.express as px
@@ -106,6 +108,9 @@ if not uploaded_file:
 # --------------------------------------------------
 df = pd.read_csv(uploaded_file)
 
+# ------------------------------------------
+# NLP Sentiment Prediction (NEW)
+# ------------------------------------------
 text_columns = df.select_dtypes(include=["object"]).columns.tolist()
 cat_columns = df.select_dtypes(include=["object", "category"]).columns.tolist()
 
@@ -120,6 +125,33 @@ st.sidebar.markdown("### 🧠 Column Selection")
 
 post_col = st.sidebar.selectbox("Text column", text_columns)
 sentiment_col = st.sidebar.selectbox("Sentiment column", cat_columns)
+
+# ------------------------------------------
+# NLP Sentiment Prediction
+# ------------------------------------------
+with st.spinner("Analyzing sentiment from text..."):
+    sentiments = df[post_col].apply(predict_sentiment)
+
+df["predicted_sentiment"] = sentiments.apply(lambda x: x[0])
+df["sentiment_score"] = sentiments.apply(lambda x: x[1])
+
+# ------------------------------------------
+# NLP Emotion Detection (sampled + cached)
+# ------------------------------------------
+EMOTION_SAMPLE = 500
+
+@st.cache_data(show_spinner=False)
+def run_emotion_batch(texts_tuple):
+    return predict_emotion_batch(list(texts_tuple), batch_size=64)
+
+emotion_sample = df[post_col].dropna().head(EMOTION_SAMPLE)
+
+with st.spinner(f"Detecting emotions on {len(emotion_sample)} rows (sampled for speed)..."):
+    sampled_emotions = run_emotion_batch(tuple(emotion_sample.tolist()))
+
+# fill full column: sampled rows get real labels, rest get "unknown"
+df["predicted_emotion"] = "unknown"
+df.loc[emotion_sample.index, "predicted_emotion"] = sampled_emotions
 
 # Optional date column detection
 date_columns = df.select_dtypes(include=["datetime", "object"]).columns.tolist()
@@ -141,7 +173,7 @@ st.markdown(f"""
             <div class="metric-label">Rows</div>
         </div>
         <div>
-            <div class="metric">🧠 {df[sentiment_col].nunique()}</div>
+            <div class="metric">🧠 {df["predicted_sentiment"].nunique()}</div>
             <div class="metric-label">Sentiment Classes</div>
         </div>
         <div>
@@ -155,11 +187,13 @@ st.markdown(f"""
 # --------------------------------------------------
 # Tabs
 # --------------------------------------------------
-tab1, tab2, tab3, tab4 = st.tabs([
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "📄 Preview",
     "📊 Distribution",
     "☁️ Word Cloud",
-    "📈 Trends"
+    "📈 Trends",
+    "😃 Emotion Distribution"
+
 ])
 
 # --------------------------------------------------
@@ -176,7 +210,7 @@ with tab1:
 with tab2:
     st.markdown('<div class="inner-card">', unsafe_allow_html=True)
 
-    counts = df[sentiment_col].value_counts().reset_index()
+    counts = df["predicted_sentiment"].value_counts().reset_index()
     counts.columns = ["Sentiment", "Count"]
 
     fig = px.pie(
@@ -195,14 +229,61 @@ with tab2:
     st.plotly_chart(fig, use_container_width=True)
     st.markdown('</div>', unsafe_allow_html=True)
 
+st.markdown("<hr>", unsafe_allow_html=True)
+st.subheader("🔍 Key Words Driving Sentiment")
+
+selected_sentiment = st.selectbox(
+    "Select sentiment to analyze",
+    df["predicted_sentiment"].unique()
+)
+
+filtered_text = " ".join(
+    df[df["predicted_sentiment"] == selected_sentiment][post_col].astype(str)
+)
+
+if filtered_text.strip():
+    wc = WordCloud(
+        width=900,
+        height=450,
+        background_color="black",
+        colormap="Reds"
+    ).generate(filtered_text)
+
+    fig_wc, ax = plt.subplots(figsize=(11, 5))
+    ax.imshow(wc, interpolation="bilinear")
+    ax.axis("off")
+    st.pyplot(fig_wc)
+else:
+    st.warning("No text available for this sentiment.")
+
+st.markdown("<hr>", unsafe_allow_html=True)
+st.subheader("📝 Example Texts")
+
+example_df = (
+    df[df["predicted_sentiment"] == selected_sentiment]
+    [[post_col]]
+    .dropna()
+    .head(5)
+)
+
+for i, row in example_df.iterrows():
+    st.markdown(
+        f"""
+        <div class="inner-card" style="margin-bottom:12px;">
+            {row[post_col]}
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+    
 # --------------------------------------------------
 # Word Cloud
 # --------------------------------------------------
 with tab3:
     st.markdown('<div class="inner-card">', unsafe_allow_html=True)
 
-    choice = st.selectbox("Choose sentiment", df[sentiment_col].unique())
-    text = " ".join(df[df[sentiment_col] == choice][post_col].astype(str))
+    choice = st.selectbox("Choose predicted sentiment", df["predicted_sentiment"].unique())
+    text = " ".join(df[df["predicted_sentiment"] == choice][post_col].astype(str))
 
     if text.strip():
         wc = WordCloud(
@@ -273,21 +354,12 @@ with tab4:
             df_time["_month"] = df_time["_parsed_date"].dt.to_period("M").astype(str)
 
             # Pick top N categories
-            top_categories = (
-                df_time[post_col]
-                .value_counts()
-                .head(top_n)
-                .index
-            )
-
-            df_filtered = df_time[df_time[post_col].isin(top_categories)]
-
             trend_data = (
-                df_filtered
-                .groupby(["_month", post_col])
+                df_time
+                .groupby(["_month", "predicted_sentiment"])
                 .size()
                 .reset_index(name="Count")
-            )
+             )
 
             # -----------------------------------
             # Export trend data (INSIDE CARD)
@@ -309,7 +381,7 @@ with tab4:
                 trend_data,
                 x="_month",
                 y="Count",
-                color=post_col,
+                color="predicted_sentiment",
                 markers=True,
                 title="Monthly Trend (Top Reactions Only)"
             )
@@ -331,28 +403,28 @@ with tab4:
 
             total_counts = (
                 df_time
-                .groupby(post_col)
+                .groupby("predicted_sentiment")
                 .size()
                 .sort_values(ascending=False)
-            )
+        )
 
-            top_reaction = total_counts.index[0]
+            top_sentiment = total_counts.index[0]
 
             peak_points = (
                 trend_data
                 .sort_values("Count", ascending=False)
                 .iloc[0]
-            )
+    )
 
-            peak_reaction = peak_points[post_col]
+            peak_sentiment = peak_points["predicted_sentiment"]
             peak_month = peak_points["_month"]
             peak_value = peak_points["Count"]
 
             st.markdown(f"""
             <div class="inner-card">
                 <ul style="font-size:16px; line-height:1.7;">
-                    <li>🔥 <b>{top_reaction}</b> is the most frequent reaction overall.</li>
-                    <li>📈 <b>{peak_reaction}</b> peaked in <b>{peak_month}</b> with <b>{int(peak_value)}</b> occurrences.</li>
+                    <li>🔥 <b>{top_sentiment}</b> is the most frequent predicted sentiment overall.</li>
+                    <li>📈 <b>{peak_sentiment}</b> peaked in <b>{peak_month}</b> with <b>{int(peak_value)}</b> occurrences.</li>
                     <li>📊 Trends are aggregated monthly for clarity.</li>
                 </ul>
             </div>
@@ -365,3 +437,35 @@ with tab4:
         st.info("Select a date column from the sidebar to view trends.")
 
     st.markdown('</div>', unsafe_allow_html=True)
+
+# --------------------------------------------------
+# Emotion Distribution
+# --------------------------------------------------
+with tab5:
+    st.markdown('<div class="inner-card">', unsafe_allow_html=True)
+
+    emotion_counts = (
+        df["predicted_emotion"]
+        .value_counts()
+        .reset_index()
+    )
+    emotion_counts.columns = ["Emotion", "Count"]
+
+    fig = px.bar(
+        emotion_counts,
+        x="Emotion",
+        y="Count",
+        title="Emotion Distribution",
+        color="Emotion"
+    )
+
+    fig.update_layout(
+        paper_bgcolor="rgba(0,0,0,0)",
+        font_color="white",
+        xaxis_title="Emotion",
+        yaxis_title="Count"
+    )
+
+    st.plotly_chart(fig, use_container_width=True)
+    st.markdown('</div>', unsafe_allow_html=True)
+
